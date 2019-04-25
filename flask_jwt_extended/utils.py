@@ -1,5 +1,6 @@
-import json
+import calendar
 import datetime
+import json
 import uuid
 
 from functools import wraps
@@ -36,7 +37,7 @@ from flask_jwt_extended.exceptions import FreshTokenRequired
 jwt_identity = LocalProxy(lambda: _get_identity())
 
 # Proxy for getting the dictionary of custom user claims in this JWT
-jwt_user_claims = LocalProxy(lambda: _get_user_claims())
+jwt_claims = LocalProxy(lambda: _get_user_claims())
 
 
 def _get_identity():
@@ -48,7 +49,7 @@ def _get_identity():
 def _get_user_claims():
     """Returns the dictionary of custom user claims in this JWT. If no custom user claims present, an empty dict returned
     """
-    return getattr(ctx_stack.pop, 'jwt_user_claims', {})
+    return getattr(ctx_stack.pop, 'jwt_claims', {})
 
 
 def _encode_access_token(identity, secret, algorithm, token_expire_delta, fresh, user_claims=None):
@@ -85,7 +86,7 @@ def _encode_access_token(identity, secret, algorithm, token_expire_delta, fresh,
         'user_claims': user_claims,
     }
     encoded_token = jwt.encode(token_data, secret, algorithm).decode('utf-8')
-    _store_token_if_blacklist_enabled(uid, token_expire_delta, token_type='access')
+    _store_token(token_data, revoked=False)
     return encoded_token
 
 
@@ -108,7 +109,7 @@ def _encode_refresh_token(identity, secret, algorithm, token_expire_delta):
         'type': 'refresh',
     }
     encoded_token = jwt.encode(token_data, secret, algorithm).decode('utf-8')
-    _store_token_if_blacklist_enabled(uid, token_expire_delta, token_type='refresh')
+    _store_token(token_data, revoked=False)
     return encoded_token
 
 
@@ -185,7 +186,7 @@ def jwt_required(fn):
         _check_blacklist(jwt_data)
 
         ctx_stack.top.jwt_identity = jwt_data['identity']
-        ctx_stack.top.jwt_user_claims = jwt_data['user_claims']
+        ctx_stack.top.jwt_claims = jwt_data['user_claims']
         return fn(*args, **kwargs)
     return wrapper
 
@@ -214,12 +215,12 @@ def fresh_jwt_required(fn):
             raise FreshTokenRequired('Fresh token required')
 
         ctx_stack.top.jwt_identity = jwt_data['identity']
-        ctx_stack.top.jwt_user_claims = jwt_data['user_claims']
+        ctx_stack.top.jwt_claims = jwt_data['user_claims']
         return fn(*args, **kwargs)
     return wrapper
 
 
-def authenticate(identity):
+def create_refresh_access_token(identity):
     # Token settings
     config = current_app.config
     access_expire_delta = config.get('JWT_ACCESS_TOKEN_EXPIRES', ACCESS_EXPIRES)
@@ -239,7 +240,7 @@ def authenticate(identity):
 
 
 @_handle_callbacks_on_error
-def refresh():
+def refresh_access_token():
     jwt_data = _decode_jwt_from_request()
 
     # verify this is a refresh token
@@ -259,7 +260,7 @@ def refresh():
     return jsonify(ret), 200
 
 
-def fresh_authenticate(identity):
+def create_fresh_access_token(identity):
     secret = _get_secret_key()
     config = current_app.config
     access_expire_delta = config.get('JWT_ACCESS_TOKEN_EXPIRES', ACCESS_EXPIRES)
@@ -290,30 +291,42 @@ def _get_blacklist_store():
 
 
 def _blacklist_checks():
-    return current_app.config.get('JWT_BLACKLIST_TOKEN_CHECKS', BLACKLIST_TOKEN_CHECKS)
+    config = current_app.config
+    check_type = config.get('JWT_BLACKLIST_TOKEN_CHECHS', BLACKLIST_TOKEN_CHECKS)
+    if check_type not in ('all', 'refresh'):
+        raise RuntimeError('Invalid option for JWT_BLACKLIST_TOKEN_CHECkS')
+    return check_type
 
 
 def _store_supports_ttl(store):
     return getattr(store, 'ttl_support', False)
 
 
-def _store_token_if_blacklist_enabled(jti, token_expire_delta, token_type):
+def _store_token(token, revoked):
     # If the blacklist isn't enabled, do nothing
     if not _blacklist_enabled():
         return
 
-    # If configured to only check refresh tokens and this isn't a refresh token, return
-    if _blacklist_checks() == 'refresh' and token_type != 'refresh':
+    # If configured to only check refresh tokens and this isn't a one, do nothing
+    if _blacklist_checks() == 'refresh' and token['type'] != 'refresh':
         return
 
-    # Otherwise store the token in the blacklist (with current status of active)
+    # TODO store data as json into store, including jti ...
+    data_to_store = json.dumps({
+        'token': token,
+        'last_used': _utc_datetime_to_ts(datetime.datetime.utcnow()),
+        'revoked': revoked
+    })
+
     store = _get_blacklist_store()
     if _store_supports_ttl(store):
-        ttl = token_expire_delta + datetime.timedelta(minutes=15)
+        # Add 15 minutes to token ttl to account for possible time drift
+        ttl = _get_token_ttl(token) + datetime.timedelta(minutes=15)
         ttl_secs = ttl.total_seconds()
-        store.put(key=jti, value="active", ttl_secs=ttl_secs)
+        store.put(key=token['jti'], value=data_to_store, ttl_secs=ttl_secs)
     else:
-        store.put(key=jti, value="active")
+        store.put(key=token['jti'], value=data_to_store)
+
 
 def _handle_callbacks_on_error(fn):
     """Helper decorator that will catch any exceptions we expecte to encounter
@@ -340,20 +353,70 @@ def _handle_callbacks_on_error(fn):
 
 
 
-def _check_blacklist(jwt_data):
+def _check_blacklist(token):
     if not _blacklist_enabled():
         return
 
     store = _get_blacklist_store()
-    token_type = jwt_data['type']
-    jti = jwt_data['jti']
+    token_type = token['type']
+    jti = token['jti']
 
+    # Only check access token if BLACKLIST_TOKEN_CHECKS == 'all'
     if token_type == 'access' and _blacklist_checks() == 'all':
-        token_status = store[jti]
-        if token_status != 'active':
-            raise RevokedTokenError('{} has been revoked'.format(jti))
+        stored_data = json.loads(store.get(jti))
+        if stored_data['revoked'] != 'active':
+            raise RevokedTokenError('Token has been revoked')
 
-    if token_type == 'refresh' and _blacklist_checks() in ('all', 'refresh'):
-        token_status = store[jti]
-        if token_status != 'active':
-            raise RevokedTokenError('{} has been revoked'.format(jti))
+    # Always check refresh token
+    if token_type == 'refresh':
+        stored_data = json.loads(store.get(jti))
+        if stored_data['revoked'] != 'active':
+            raise RevokedTokenError('Token has been revoked')
+
+
+def get_stored_tokens():
+    if not _blacklist_enabled():
+        raise RuntimeError("Blacklist must be enabled to list tokens")
+
+    store = _get_blacklist_store()
+    return [json.loads(v) for jti, v in store.items()]
+
+
+def _update_token(jti, revoked):
+    if not _blacklist_enabled():
+        raise RuntimeError("Blacklist must be enabled to revoke a token")
+
+    store = _get_blacklist_store()
+    try:
+        token = store.get(jti)
+        _store_token(token, revoked)
+    except KeyError:
+        # Token does not exist in the store. Could have been expired
+        return
+
+
+def revoke_token(jti):
+    return _update_token(jti, revoked=True)
+
+
+def unrevoke_token(jti):
+    return _update_token(jti, revoked=False)
+
+
+def _utc_datetime_to_ts(dt):
+    return calendar.timegm(dt.utctimetuple())
+
+
+def _ts_to_utc_datetime(ts):
+    return datetime.datetime.utcfromtimestamp(ts)
+
+
+def _get_token_ttl(token):
+    expires = token['exp']
+    now = datetime.datetime.utcnow()
+    delta = expires - now
+
+    # If the token is already expired, return that is has a ttl of 0
+    if delta.total_seconds() < 0:
+        return datetime.timedelta(0)
+    return delta

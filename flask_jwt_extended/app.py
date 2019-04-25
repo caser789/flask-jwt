@@ -11,10 +11,13 @@ from flask_jwt_extended import JWTManager
 from flask_jwt_extended import jwt_required
 from flask_jwt_extended import fresh_jwt_required
 from flask_jwt_extended import jwt_identity
-from flask_jwt_extended import refresh
-from flask_jwt_extended import fresh_authenticate
-from flask_jwt_extended import jwt_user_claims
-from flask_jwt_extended import authenticate
+from flask_jwt_extended import jwt_claims
+from flask_jwt_extended import create_refresh_access_token
+from flask_jwt_extended import create_fresh_access_token
+from flask_jwt_extended import refresh_access_token
+from flask_jwt_extended import revoke_token
+from flask_jwt_extended import unrevoke_token
+from flask_jwt_extended import get_stored_tokens
 
 # Example users database
 
@@ -44,6 +47,8 @@ app.config['JWT_REFRESH_TOKEN_EXPIRES'] = timedelta(days=7) # default to 30 days
 app.config['ALGORITHM'] = 'HS512' # defalt HS256
 
 # Enable JWT blacklist / token revoke
+app.config['JWT_BLACKLIST_ENABLED'] = True
+
 #
 # We are going to be using a simple in memory blacklist for this example. In
 # production, you will likely prefer something like redis (it can work with
@@ -51,9 +56,12 @@ app.config['ALGORITHM'] = 'HS512' # defalt HS256
 # tokens to the blacklist doesn't blow up). Check here for available options:
 # http://pythonhosted.org/simplekv/
 blacklist_store = simplekv.memory.DictStore()
-app.config['JWT_BLACKLIST_ENABLED'] = True
 app.config['JWT_BLACKLIST_STORE'] = blacklist_store
-app.config['JWT_BLACKLIST_TOKEN_CHECKS'] = 'refresh'  # Only check blacklist for refresh tokens
+
+# Only check the blacklist for refresh token. Available options are:
+#   'all': Check both access and refresh tokens
+#   'refresh' Check only for refresh token
+app.config['JWT_BLACKLIST_TOKEN_CHECKS'] = 'refresh'
 
 
 jwt = JWTManager(app)
@@ -91,7 +99,7 @@ def my_expired_response():
 
 
 # Endpoint for authing an user
-@app.route('/auth', methods=['POST'])
+@app.route('/auth/login', methods=['POST'])
 def login():
     username = request.json.get('username', None)
     password = request.json.get('password', None)
@@ -104,11 +112,11 @@ def login():
     if USERS[username]['password'] != password:
         return jsonify({'msg': 'Bad username or password'}), 401
 
-    return authenticate(identity=username)
+    return create_refresh_access_token(identity=username)
 
 
 # Endpoint for getting a fresh access token for an user
-@app.route('/fresh-auth', methods=['POST'])
+@app.route('/auth/fresh-login', methods=['POST'])
 def fresh_login():
     username = request.json.get('username', None)
     password = request.json.get('password', None)
@@ -121,29 +129,59 @@ def fresh_login():
     if USERS[username]['password'] != password:
         return jsonify({'msg': 'Bad username or password'}), 401
 
-    return fresh_authenticate(identity=username)
+    return create_fresh_access_token(identity=username)
 
 
 # Endpoint for generating a non-fresh access token from the refresh token
-@app.route('/refresh', methods=['POST'])
+@app.route('/auth/refresh', methods=['POST'])
 def refresh_token():
-    return refresh()
+    return refresh_access_token()
 
 
 @app.route('/protected', methods=['GET'])
 @jwt_required
 def non_fresh_protected():
-    ip = jwt_user_claims('test1')['ip']
-    msg = '{} says hello from {}'.format(jwt_identity, ip)
+    ip = jwt_claims('test1')['ip']
+    username = jwt_identity  # Access identity through jwt_identity proxy
+
+    msg = '{} says hello from {}'.format(username, ip)
     return jsonify({'msg': msg})
 
 
 @app.route('/protected-fresh', methods=['GET'])
 @fresh_jwt_required
 def fresh_protected():
-    ip = jwt_user_claims('test1')['ip']
+    ip = jwt_claims('test1')['ip']
     msg = '{} says hello from {} (fresh)'.format(jwt_identity, ip)
     return jsonify({'msg': msg})
+
+
+# TODO endpoint for revoking and unrevoking a token 
+@app.route('/auth/tokens/<string:jti>', methods=['PUT'])
+def revoke_jwt(jti):
+    # TODO you should put some extra protection on this, so a user can only
+    #      modify their tokens
+    revoke = request.json.get('revoke', None)
+    if revoke is None:
+        return jsonify({'msg': "Missing json argument: 'revoke'"}), 422
+    if not isinstance(revoke, bool):
+        return jsonify({'msg': "'revoke' must be a boolean"}), 422
+    if revoke:
+        revoke_token(jti)
+    else:
+        unrevoke_token(jti)
+
+
+# Endpoint for listing tokens
+@app.route('/auth/tokens', methods=['GET'])
+def list_tokens():
+    # TODO you should put some extra protection on this, so a user can only
+    #      view their tokens, or some extra privillage roles so an admin can
+    #      view everyones token
+    return jsonify(get_stored_tokens()), 200
+
+
+
 
 
 if __name__ == '__main__':

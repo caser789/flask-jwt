@@ -20,4 +20,4 @@ BLACKLIST_ENABLED = False
 BLACKLIST_STORE = None
 
 # blacklist check requests. Possible values are all, refresh, and None
-BLACKLIST_TOKEN_CHECKS = None
+BLACKLIST_TOKEN_CHECKS = 'refresh'
