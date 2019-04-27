@@ -12,7 +12,7 @@ easier. These include:
 # Installation
 The easiest way to start working with this extension with pip:
 ```
-pip install flask-jwt-extended
+pip install xj-flask-jwt-extended
 ```
 
 If you prefer to install from source, you can clone this repo and run

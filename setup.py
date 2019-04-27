@@ -1,11 +1,11 @@
 """
-Flask-JWT-Extension
+Flask-JWT-Extended
 -------------------
 Flask-Login provides jwt endpoint protection for Flask.
 """
 from setuptools import setup
 
-setup(name='XJ-Flask-JWT-Extension',
+setup(name='JX-Flask-JWT-Extention',
       version='0.0.2',
       url='https://github.com/caser789/flask-jwt',
       license='MIT',
