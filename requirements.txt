@@ -21,7 +21,7 @@ livereload==2.4.1
 pathtools==0.1.2
 pluggy==0.3.1
 port-for==0.3.1
-py==1.4.31
+py==1.10.0
 pytz==2016.7
 simplekv==0.10.0
 singledispatch==3.4.0.3
